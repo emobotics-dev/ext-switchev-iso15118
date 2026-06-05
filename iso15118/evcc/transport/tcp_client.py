@@ -49,7 +49,14 @@ class TCPClient(asyncio.Protocol):
                 host=full_host_address,
                 port=port,
                 family=socket.AF_INET6,
+                # SNI must be the *unscoped* IP literal. asyncio otherwise
+                # defaults server_hostname to `host` (the scoped
+                # "addr%iface"), which Python sends verbatim as the SNI — an
+                # RFC 6066 sec.3 violation (no IP literals, and a scope is not a
+                # hostname) that conformant TLS 1.3 servers reject. For an
+                # unscoped IP literal Python omits the SNI extension entirely.
                 ssl=self.ssl_context,
+                server_hostname=host.compressed,
             )
         except ConnectionRefusedError as exc:
             raise exc
