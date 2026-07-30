@@ -272,8 +272,27 @@ class CommunicationSessionHandler:
                 if isinstance(notification, UDPPacketNotification):
                     await self.process_incoming_udp_packet(notification)
                 elif isinstance(notification, TCPClientNotification):
-                    if self.udp_server:
-                        self.udp_server.pause_udp_server()
+                    # Do NOT pause the UDP server here.
+                    #
+                    # [V2G20-144] makes answering every SdpRequest the default.
+                    # [V2G20-722]/[V2G20-723] merely *permit* an SECC to stop
+                    # once a TLS connection is up — they do not require it, and
+                    # taking the option costs discovery time for no benefit,
+                    # because SDP is stateless and answering is harmless.
+                    #
+                    # Measured against the oxicharge EVCC, 5 consecutive
+                    # sessions against one SECC process: pausing here made every
+                    # reconnect wait sdp=5021-5028 ms, against 20 ms on the first
+                    # session. The UDP server stayed paused for the whole session
+                    # AND the [V2G20-1633] teardown hold (~6.5 s), so the EV's
+                    # retransmissions were dropped until the TCP server closed.
+                    # The EV recovers only because it retries at the
+                    # [V2G20-159] 250 ms floor.
+                    #
+                    # `resume_udp_server()` at the end of the session is removed
+                    # for the same reason; both methods are left in place on
+                    # `UDPServer` so this stays a two-line divergence from
+                    # upstream.
                     logger.info(
                         "TCP client connected, client address is "
                         f"{notification.ip_address}."
@@ -336,8 +355,8 @@ class CommunicationSessionHandler:
                 )
 
         self.tcp_server_handler = None
-        if self.udp_server:
-            self.udp_server.resume_udp_server()
+        # No `resume_udp_server()` — the server is never paused now. See the
+        # [V2G20-144] note at the `TCPClientNotification` branch above.
 
     async def start_tcp_server(self, with_tls: bool):
         if self.tcp_server_handler:
