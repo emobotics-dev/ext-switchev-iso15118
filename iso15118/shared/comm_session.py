@@ -395,21 +395,38 @@ class V2GCommunicationSession(SessionStateMachine):
         else:
             terminate_or_pause = SessionStopAction.TERMINATE
 
-        logger.info(
-            f"The data link will {terminate_or_pause} in 2 seconds and "
-            "the TCP connection will close in 5 seconds. "
-        )
+        # The 2 s + 3 s hold is an SECC requirement, not an EVCC one, so it is
+        # applied per role instead of to both from this shared path.
+        #
+        # [V2G20-1633]: the SECC closes the TCP connection at least 5 s after
+        # SessionStopRes — a floor on the *SECC*.
+        # [V2G20-717]/[V2G20-025]: the EVCC terminates its data link and its TLS
+        # connection once the session stops, with no such delay.
+        #
+        # Holding as the EVCC is not merely unnecessary, it is charged to the
+        # peer: an SECC that ends its own [V2G20-1633] hold early on a clean peer
+        # close (as the standard intends, and as oxicharge's SECC does) cannot
+        # end it until the EVCC actually closes. Measured against the oxicharge
+        # SECC over 5 consecutive sessions, this delay was the dominant cost of
+        # the whole cycle — the board logged `EVCC closed 4951-4996ms after
+        # SessionStopRes` every time, on a session whose own work took 1.9-2.1 s.
+        is_secc = hasattr(self.comm_session, "evse_controller")
+        if is_secc:
+            logger.info(
+                f"The data link will {terminate_or_pause} in 2 seconds and "
+                "the TCP connection will close in 5 seconds. "
+            )
         logger.info(f"Reason: {reason}")
 
-        await asyncio.sleep(2)
-        # Signal data link layer to either terminate or pause the data
-        # link connection
-        if hasattr(self.comm_session, "evse_controller"):
+        if is_secc:
+            await asyncio.sleep(2)
+            # Signal data link layer to either terminate or pause the data
+            # link connection
             evse_controller = self.comm_session.evse_controller
             await evse_controller.update_data_link(terminate_or_pause)
             await evse_controller.session_ended(str(self.current_state), reason)
-        logger.info(f"{terminate_or_pause}d the data link")
-        await asyncio.sleep(3)
+            logger.info(f"{terminate_or_pause}d the data link")
+            await asyncio.sleep(3)
         try:
             self.writer.close()
             await self.writer.wait_closed()
