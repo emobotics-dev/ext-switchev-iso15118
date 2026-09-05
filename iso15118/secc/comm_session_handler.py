@@ -380,13 +380,35 @@ class CommunicationSessionHandler:
             )
         await self.check_status_task(False)
 
+    def _tcp_server_serving(self, with_tls: bool) -> bool:
+        """True when a TCP server task is alive in the requested security mode."""
+        handler = self.tcp_server_handler
+        return (
+            handler is not None
+            and not handler.done()
+            and self.tcp_server.is_tls_enabled == with_tls
+        )
+
     async def process_sdp_request(
         self, sdp_request: SDPRequest
     ) -> Union[SDPResponse, SDPResponseWireless]:
-        if self.config.enforce_tls or sdp_request.security == Security.TLS:
-            await self.start_tcp_server(True)
-        else:
-            await self.start_tcp_server(False)
+        with_tls = self.config.enforce_tls or sdp_request.security == Security.TLS
+        # Answer WITHOUT disturbing a server that is already listening.
+        #
+        # This finishes 4ed1d6a. That commit stopped pausing the UDP server, per
+        # [V2G20-144] — answering every SdpRequest is the default. The pause was
+        # also what had made this path unreachable during a live session, so
+        # removing it exposed `start_tcp_server`, which cancels the server task
+        # and thereby closes the listening socket AND the established connection
+        # on it. An EV retransmitting at the [V2G20-159] floor then kills its own
+        # session, and the EVCC sees a mid-handshake `Io` error that no
+        # [V2G20-162] connect retry can recover — the connect already succeeded.
+        #
+        # Nothing in -2/-20 asks for a fresh listener per request: SDP reports
+        # where the SECC listens. So report it, and only (re)start when nothing
+        # is serving or the security mode actually differs.
+        if not self._tcp_server_serving(with_tls):
+            await self.start_tcp_server(with_tls)
 
         port = self.tcp_server.port
         # convert IPv6 address from presentation to numeric format
