@@ -129,6 +129,9 @@ class EVCCCommunicationSession(V2GCommunicationSession):
         # Whether to pause, standby or terminate a charging session. Is set when sending
         # a PowerDeliveryReq (ISO 15118-20)
         self.charging_session_stop_v20: Optional[ChargingSessionV20] = None
+        # The EVCC is in a standby period (ISO 15118-20): it stopped drawing
+        # power after a Pause and waits for ExitStandby
+        self.in_standby: bool = False
         # Whether a renegotiation was requested by the SECC (with either
         # a MeteringReceiptRes, ChargingStatusRes, or CurrentDemandRes) or EVCC
         self.renegotiation_requested = False

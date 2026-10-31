@@ -40,6 +40,7 @@ from iso15118.shared.messages.iso15118_20.common_messages import (
     AuthorizationSetupRes,
     CertificateInstallationReq,
     ChannelSelection,
+    ChargeProgress,
     ChargingSession,
     EIMAuthReqParams,
     MatchedService,
@@ -1264,6 +1265,24 @@ class ACChargeLoop(StateEVCC):
         if ac_charge_loop_res.evse_status:
             renegotiation = False
             evse_notification = ac_charge_loop_res.evse_status.evse_notification
+            if evse_notification == EVSENotification.PAUSE:
+                # [V2G20-1850]: the EV may take a pause as a standby period.
+                if not self.comm_session.in_standby:
+                    self.comm_session.in_standby = True
+                    self.standby_v20_charging()
+                else:
+                    await self.continue_charge_loop()
+                return
+            if evse_notification == EVSENotification.EXIT_STANDBY:
+                # [V2G20-1854]: leave the standby with PowerDeliveryReq(Start).
+                if self.comm_session.in_standby:
+                    self.comm_session.in_standby = False
+                    await PowerDelivery.create_new_power_delivery_req(
+                        self, self.comm_session.schedule_exchange_res
+                    )
+                else:
+                    await self.continue_charge_loop()
+                return
             if evse_notification not in [
                 EVSENotification.SERVICE_RENEGOTIATION,
                 EVSENotification.TERMINATE,
@@ -1280,62 +1299,87 @@ class ACChargeLoop(StateEVCC):
             )
 
         elif await self.comm_session.ev_controller.continue_charging():
-            scheduled_params, dynamic_params = None, None
-            bpt_scheduled_params, bpt_dynamic_params = None, None
-            selected_energy_service = self.comm_session.selected_energy_service
-            control_mode = self.comm_session.control_mode
-            ev_controller = self.comm_session.ev_controller
-
-            # TODO You might want to change certain request params based on the values
-            #      in the response
-
-            if selected_energy_service.service in [ServiceV20.AC, ServiceV20.AC_BPT]:
-                charging_loop_params = (
-                    await ev_controller.get_ac_charge_loop_params_v20(  # noqa
-                        control_mode, selected_energy_service.service
-                    )
-                )
-                if selected_energy_service.service == ServiceV20.AC:
-                    if control_mode == ControlMode.SCHEDULED:
-                        scheduled_params = charging_loop_params
-                    else:
-                        # Dynamic
-                        dynamic_params = charging_loop_params
-                else:
-                    # AC_BPT
-                    if control_mode == ControlMode.SCHEDULED:
-                        bpt_scheduled_params = charging_loop_params
-                    else:
-                        # Dynamic
-                        bpt_dynamic_params = charging_loop_params
-            else:
-                logger.error(
-                    f"This shouldn't happen. {selected_energy_service.service} "
-                    f"not expected here."
-                )
-                return
-
-            ac_charge_loop_req = ACChargeLoopReq(
-                header=MessageHeader(
-                    session_id=self.comm_session.session_id,
-                    timestamp=time.time(),
-                ),
-                scheduled_params=scheduled_params,
-                dynamic_params=dynamic_params,
-                bpt_scheduled_params=bpt_scheduled_params,
-                bpt_dynamic_params=bpt_dynamic_params,
-                meter_info_requested=False,
-            )
-
-            self.create_next_message(
-                ACChargeLoop,
-                ac_charge_loop_req,
-                Timeouts.AC_CHARGE_LOOP_REQ,
-                Namespace.ISO_V20_AC,
-                ISOV20PayloadTypes.AC_MAINSTREAM,
-            )
+            await self.continue_charge_loop()
         else:
             self.stop_v20_charging(next_state=PowerDelivery)
+
+    async def continue_charge_loop(self):
+        """Send the next ACChargeLoopReq."""
+        scheduled_params, dynamic_params = None, None
+        bpt_scheduled_params, bpt_dynamic_params = None, None
+        selected_energy_service = self.comm_session.selected_energy_service
+        control_mode = self.comm_session.control_mode
+        ev_controller = self.comm_session.ev_controller
+
+        # TODO You might want to change certain request params based on the values
+        #      in the response
+
+        if selected_energy_service.service in [ServiceV20.AC, ServiceV20.AC_BPT]:
+            charging_loop_params = (
+                await ev_controller.get_ac_charge_loop_params_v20(  # noqa
+                    control_mode, selected_energy_service.service
+                )
+            )
+            if selected_energy_service.service == ServiceV20.AC:
+                if control_mode == ControlMode.SCHEDULED:
+                    scheduled_params = charging_loop_params
+                else:
+                    # Dynamic
+                    dynamic_params = charging_loop_params
+            else:
+                # AC_BPT
+                if control_mode == ControlMode.SCHEDULED:
+                    bpt_scheduled_params = charging_loop_params
+                else:
+                    # Dynamic
+                    bpt_dynamic_params = charging_loop_params
+        else:
+            logger.error(
+                f"This shouldn't happen. {selected_energy_service.service} "
+                f"not expected here."
+            )
+            return
+
+        ac_charge_loop_req = ACChargeLoopReq(
+            header=MessageHeader(
+                session_id=self.comm_session.session_id,
+                timestamp=time.time(),
+            ),
+            scheduled_params=scheduled_params,
+            dynamic_params=dynamic_params,
+            bpt_scheduled_params=bpt_scheduled_params,
+            bpt_dynamic_params=bpt_dynamic_params,
+            meter_info_requested=False,
+        )
+
+        self.create_next_message(
+            ACChargeLoop,
+            ac_charge_loop_req,
+            Timeouts.AC_CHARGE_LOOP_REQ,
+            Namespace.ISO_V20_AC,
+            ISOV20PayloadTypes.AC_MAINSTREAM,
+        )
+
+    def standby_v20_charging(self):
+        """Stop drawing power without ending the session: a standby period
+        ([V2G20-1850]). The charge loop goes on after the SECC's answer."""
+        power_delivery_req = PowerDeliveryReq(
+            header=MessageHeader(
+                session_id=self.comm_session.session_id,
+                timestamp=time.time(),
+            ),
+            ev_processing=Processing.FINISHED,
+            charge_progress=ChargeProgress.STANDBY,
+        )
+        self.create_next_message(
+            PowerDelivery,
+            power_delivery_req,
+            Timeouts.POWER_DELIVERY_REQ,
+            Namespace.ISO_V20_COMMON_MSG,
+            ISOV20PayloadTypes.MAINSTREAM,
+        )
+
+
 
 
 # ============================================================================

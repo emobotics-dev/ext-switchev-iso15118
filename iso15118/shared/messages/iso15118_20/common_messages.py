@@ -1004,7 +1004,7 @@ class PowerDeliveryReq(V2GRequest):
             charge_progress = values.get("ChargeProgress")
         if (
             ev_processing == Processing.ONGOING
-            or charge_progress == ChargeProgress.STOP
+            or charge_progress != ChargeProgress.START
         ):
             return values
 
